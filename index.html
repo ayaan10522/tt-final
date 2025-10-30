@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <link rel="icon" href="logo.png">
+      <link rel="icon" href="logo.png">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ayaan's Advanced Timetable Maker</title>
@@ -36,6 +36,7 @@
         let isLicenseValid = false;
         let currentLicenseKey = null;
         let licensePollIntervalId = null;
+        let notificationsRef = null;
 
         // Simple obfuscation helpers (not real encryption)
         function obfuscate(str) {
@@ -107,6 +108,10 @@
                         // Fail closed: show modal overlay again
                         showLicenseModal(true);
                     }
+                    // Also fetch any notifications for this key
+                    if (valid) {
+                        checkNotifications(currentLicenseKey);
+                    }
                 });
             }, 30000);
         }
@@ -121,6 +126,9 @@
                             showLicenseModal(true);
                         } else {
                             currentLicenseKey = savedKey;
+                            // Start real-time notifications and immediate fetch
+                            listenNotifications(savedKey);
+                            checkNotifications(savedKey);
                             startLicensePolling();
                         }
                     });
@@ -177,6 +185,9 @@
                         if (isValid) {
                             document.getElementById('licenseModal').remove();
                             currentLicenseKey = licenseKey;
+                            // Start real-time notifications and immediate fetch
+                            listenNotifications(licenseKey);
+                            checkNotifications(licenseKey);
                             startLicensePolling();
                         } else {
                             document.getElementById('licenseMessage').textContent = 'Invalid, expired, banned or blocked license key';
@@ -196,6 +207,138 @@
                 }
                 lastCheck = Date.now();
             }, 5000);
+        }
+        
+        // Notification helpers
+        function getSeenNotifications() {
+            try {
+                const v = localStorage.getItem('lk_ns');
+                const raw = v ? deobfuscate(v) : null;
+                return raw ? JSON.parse(raw) : {};
+            } catch (_) { return {}; }
+        }
+        function setSeenNotifications(obj) {
+            try { localStorage.setItem('lk_ns', obfuscate(JSON.stringify(obj))); } catch (_) {}
+        }
+        function showNotificationToast(message) {
+            ensureNotifContainer();
+            const toast = document.createElement('div');
+            toast.className = 'notif-toast';
+            toast.textContent = message;
+            // Inline styles to avoid any CSS conflicts
+            toast.style.cssText = [
+                'background: rgba(0,0,0,0.92)',
+                'color: #fff',
+                'padding: 12px 16px',
+                'border-radius: 8px',
+                'box-shadow: 0 4px 12px rgba(0,0,0,0.3)',
+                'max-width: 340px',
+                'font-size: 14px',
+                'line-height: 1.3',
+                'pointer-events: auto',
+                'opacity: 0',
+                'transform: translateY(8px)',
+                'transition: opacity 160ms ease, transform 160ms ease'
+            ].join(';');
+            const container = document.getElementById('notif-container');
+            try {
+                container.appendChild(toast);
+                // trigger fade-in without class dependency
+                requestAnimationFrame(() => {
+                    try {
+                        toast.style.opacity = '1';
+                        toast.style.transform = 'translateY(0)';
+                    } catch(_) {}
+                });
+            } catch (e) {
+                console.error('[notif] failed to append toast', e);
+                alert(String(message));
+                return;
+            }
+            // Auto-remove after timeout
+            setTimeout(() => { try { toast.remove(); } catch(_) {} }, 7000);
+        }
+        function ensureNotifContainer() {
+            if (!document.getElementById('notif-container')) {
+                const c = document.createElement('div');
+                c.id = 'notif-container';
+                // Inline styles to ensure topmost stacking
+                c.style.cssText = [
+                    'position: fixed',
+                    'right: 16px',
+                    'bottom: 16px',
+                    'display: flex',
+                    'flex-direction: column',
+                    'gap: 8px',
+                    'z-index: 2147483647',
+                    'pointer-events: none'
+                ].join(';');
+                document.body.appendChild(c);
+            }
+        }
+        function checkNotifications(key) {
+            database.ref('notifications/' + key).once('value')
+                .then((snapshot) => {
+                    console.log('[notif] once value for', key, 'exists=', snapshot.exists());
+                    if (!snapshot.exists()) return;
+                    const seen = getSeenNotifications();
+                    snapshot.forEach(child => {
+                        const nid = child.key;
+                        if (!seen[nid]) {
+                            const data = child.val() || {};
+                            console.log('[notif] showing unseen (once):', nid, data);
+                            if (data && data.message) {
+                                showNotificationToast(String(data.message));
+                            }
+                            seen[nid] = 1;
+                        }
+                    });
+                    setSeenNotifications(seen);
+                })
+                .catch(err => console.error('Error fetching notifications', err));
+        }
+
+        // Real-time notifications listener
+        function listenNotifications(key) {
+            try {
+                if (notificationsRef && typeof notificationsRef.off === 'function') {
+                    notificationsRef.off();
+                }
+            } catch (_) {}
+            notificationsRef = database.ref('notifications/' + key);
+            console.log('[notif] attaching listeners for key', key);
+            const seen = getSeenNotifications();
+            notificationsRef.on('child_added', (snapshot) => {
+                const nid = snapshot.key;
+                if (!seen[nid]) {
+                    const data = snapshot.val() || {};
+                    console.log('[notif] child_added:', nid, data);
+                    if (data && data.message) {
+                        showNotificationToast(String(data.message));
+                    }
+                    seen[nid] = 1;
+                    setSeenNotifications(seen);
+                }
+            }, (err) => {
+                console.error('Notifications stream error', err);
+            });
+
+            // Fallback: also listen to full value changes to catch missed adds
+            notificationsRef.on('value', (snapshot) => {
+                const s = getSeenNotifications();
+                snapshot.forEach(child => {
+                    const nid = child.key;
+                    if (!s[nid]) {
+                        const data = child.val() || {};
+                        console.log('[notif] value fallback:', nid, data);
+                        if (data && data.message) {
+                            showNotificationToast(String(data.message));
+                        }
+                        s[nid] = 1;
+                    }
+                });
+                setSeenNotifications(s);
+            });
         }
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
