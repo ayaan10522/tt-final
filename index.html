@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-      <link rel="icon" href="logo.icns">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ayaan's Advanced Timetable Maker</title>
@@ -7093,96 +7092,7 @@
           reader.readAsText(file);
         };
 
-        const exportConstraintsCSV = () => {
-          let csv = 'Type,Col1,Col2,Col3\n';
-          // firstPeriodAssignments
-          Object.keys(firstPeriodAssignments||{}).forEach(cls => {
-            Object.keys(firstPeriodAssignments[cls]||{}).forEach(day => {
-              const fp = firstPeriodAssignments[cls][day];
-              if (fp && (fp.subject||fp.teacher)) csv += `FirstPeriod,${cls},${day},${fp.subject}|${fp.teacher||''}\n`;
-            });
-          });
-          // lastPeriodSubjectRestrictions
-          (lastPeriodSubjectRestrictions||[]).forEach(r => {
-            csv += `LastPeriodRestriction,${r.className},${r.subject},-\n`;
-          });
-          // events
-          (events||[]).forEach(ev => {
-            csv += `Event,${ev.className},${ev.day},P${ev.period}\n`;
-          });
-          const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-          const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download='constraints.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        };
-
-        const importConstraintsCSV = (e) => {
-          const file = e.target.files?.[0]; if(!file) return;
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            try {
-              const textRaw = String(ev.target.result||'');
-              const text = textRaw.replace(/^\ufeff/, '');
-              const lines = text.split(/\r?\n/).map(l=>l.trim());
-              const nonEmpty = lines.filter(l=>l.length>0);
-
-              const fpNew = {};
-              const restrNew = [];
-              const eventsNew = [];
-
-              let i = 0;
-              // FirstPeriod Assignments
-              const title1 = nonEmpty[i]||'';
-              if (/^,?FirstPeriod Assignments/i.test(title1)) {
-                i += 1; // skip title
-                const header = (nonEmpty[i++]||'').split(',').map(s=>s.replace(/^"|"$/g,''));
-                const days = header.slice(2);
-                while (i < nonEmpty.length && nonEmpty[i] && !/^,?LastPeriod Restrictions/i.test(nonEmpty[i])) {
-                  const parts = nonEmpty[i++].split(',').map(s=>s.replace(/^"|"$/g,''));
-                  const cls = parts[1];
-                  days.forEach((day, idx) => {
-                    const cell = parts[2+idx]||'';
-                    const m = cell.match(/^(.*?)\s*\((.*?)\)$/);
-                    const subject = m ? m[1] : (cell||'');
-                    const teacher = m ? m[2] : '';
-                    if (subject || teacher) {
-                      if (!fpNew[cls]) fpNew[cls] = {};
-                      fpNew[cls][day] = { subject, teacher };
-                    }
-                  });
-                }
-              }
-
-              // LastPeriod Restrictions
-              while (i < nonEmpty.length && nonEmpty[i] === '') i++;
-              if (/^,?LastPeriod Restrictions/i.test(nonEmpty[i]||'')) {
-                i += 2; // skip title + header
-                while (i < nonEmpty.length && nonEmpty[i] && !/^,?Events/i.test(nonEmpty[i])) {
-                  const parts = nonEmpty[i++].split(',').map(s=>s.replace(/^"|"$/g,''));
-                  if (parts.length >= 3) restrNew.push({ className: parts[1], subject: parts[2] });
-                }
-              }
-
-              // Events
-              while (i < nonEmpty.length && nonEmpty[i] === '') i++;
-              if (/^,?Events/i.test(nonEmpty[i]||'')) {
-                i += 2; // skip title + header
-                while (i < nonEmpty.length && nonEmpty[i]) {
-                  const parts = nonEmpty[i++].split(',').map(s=>s.replace(/^"|"$/g,''));
-                  if (parts.length >= 5) {
-                    const p = parseInt((parts[3]||'').replace(/^P/,''))||0;
-                    eventsNew.push({ className: parts[1], day: parts[2], periodIndex: Math.max(0, p-1), label: parts[4]||'Event' });
-                  } else break;
-                }
-              }
-
-              setFirstPeriodAssignments(fpNew);
-              setLastPeriodSubjectRestrictions(restrNew);
-              setEvents(eventsNew);
-              alert('Constraints imported');
-            } catch(err){ alert('Failed to import Constraints CSV'); }
-            finally { e.target.value=''; }
-          };
-          reader.readAsText(file);
-        };
+        
         // The main App component that handles navigation
         const App = () => {
           const [currentPage, setCurrentPage] = useState(loadState() ? 'app' : 'landing'); // Start on app if state is loaded
