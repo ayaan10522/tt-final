@@ -6164,9 +6164,9 @@
                         {/* Import/Export for Constraints */}
                         <div className="flex flex-wrap gap-2">
                           <Button variant="secondary" onClick={() => exportConstraintsCSV()} className="text-xs px-3 py-2">Export Constraints (CSV)</Button>
-                          <div>
-                            <Button variant="secondary" onClick={() => document.getElementById('import-constraints-input').click()} className="text-xs px-3 py-2">Import Constraints (CSV)</Button>
-                            <input id="import-constraints-input" type="file" accept=".csv" className="hidden" onChange={(e) => importConstraintsCSV(e)} />
+                          <div className="flex items-center gap-2">
+                            <label htmlFor="import-constraints-input" className="inline-block bg-gray-200 text-gray-800 hover:bg-gray-300 rounded-md text-xs px-3 py-2 cursor-pointer">Import Constraints (CSV)</label>
+                            <input id="import-constraints-input" type="file" accept="text/csv,.csv" className="hidden" onChange={(e) => importConstraintsCSV(e)} />
                           </div>
                         </div>
 
