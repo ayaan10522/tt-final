@@ -2298,6 +2298,7 @@
           const [lastPeriodSubjectRestrictions, setLastPeriodSubjectRestrictions] = useState(loadedState?.lastPeriodSubjectRestrictions || []); 
           const [events, setEvents] = useState(loadedState?.events || []); 
           const [subjectPeriodsPerWeek, setSubjectPeriodsPerWeek] = useState(loadedState?.subjectPeriodsPerWeek || createInitialSubjectPeriodsPerWeek(initialClasses, initialSubjects)); // New state
+          const [doublePeriodSubjects, setDoublePeriodSubjects] = useState(loadedState?.doublePeriodSubjects || {}); // Track subjects that should be in pairs (double periods)
 
           // New states for absent teachers and proxy management
           const [absentTeachers, setAbsentTeachers] = useState(loadedState?.absentTeachers || []);
@@ -2476,7 +2477,7 @@
                   teachers, classes, subjects, periodsPerDay, workingDays, offDays,
                   halfDayPeriods, halfDays, lunchBreakPeriod, breakLabel, assignments,
                   timetable, teacherTimetable, firstPeriodAssignments, teacherStartPeriod,
-                  lastPeriodSubjectRestrictions, events, subjectPeriodsPerWeek, // Save new states
+                  lastPeriodSubjectRestrictions, events, subjectPeriodsPerWeek, doublePeriodSubjects, // Save new states
                   absentTeachers, proxyTeachers, proxyAssignments, originalTimetable, freeClassReasons,
                   ensureTeacherFreePeriod, selectedAutoDistributeTeacher, useAltTheme // Save class teacher assignments and theme
               };
@@ -2484,7 +2485,7 @@
           }, [teachers, classes, subjects, periodsPerDay, workingDays, offDays,
               halfDayPeriods, halfDays, lunchBreakPeriod, breakLabel, assignments,
               timetable, teacherTimetable, firstPeriodAssignments, teacherStartPeriod,
-              lastPeriodSubjectRestrictions, events, subjectPeriodsPerWeek,
+              lastPeriodSubjectRestrictions, events, subjectPeriodsPerWeek, doublePeriodSubjects,
               absentTeachers, proxyTeachers, proxyAssignments, originalTimetable, freeClassReasons,
               ensureTeacherFreePeriod, selectedAutoDistributeTeacher, useAltTheme]);
           // --- END LOCAL STORAGE SAVE EFFECT ---
@@ -2507,6 +2508,7 @@
                       return newFirstPeriods;
                   });
                   setSubjectPeriodsPerWeek(prev => ({ ...prev, [trimmedItem]: {} }));
+                  setDoublePeriodSubjects(prev => ({ ...prev, [trimmedItem]: {} }));
               }
             }
           };
@@ -2531,7 +2533,22 @@
                     delete newSubjectPeriods[itemToRemove];
                     return newSubjectPeriods;
                 });
+                setDoublePeriodSubjects(prev => {
+                    const newDoublePeriods = { ...prev };
+                    delete newDoublePeriods[itemToRemove];
+                    return newDoublePeriods;
+                });
             }
+          };
+
+          const handleDoublePeriodToggle = (className, subject, checked) => {
+            setDoublePeriodSubjects(prev => ({
+              ...prev,
+              [className]: {
+                ...(prev[className] || {}),
+                [subject]: checked
+              }
+            }));
           };
 
           const handleAssignmentChange = (className, subject, teacher) => {
@@ -3360,9 +3377,13 @@
 
                           classWeeklyAvail += Math.max(0, avail);
 
-                          if (!allowDoublePeriods) {
+                          const isDoubleSub = doublePeriodSubjects[className]?.[subject] || false;
+                          if (!allowDoublePeriods && !isDoubleSub) {
                               // At most 1 per day if no double periods and there is at least one slot
                               subjectPerDayCap += avail > 0 ? 1 : 0;
+                          } else {
+                              // If global double periods allowed OR this specific subject is marked as pair/double
+                              subjectPerDayCap += avail;
                           }
                       });
 
@@ -3383,7 +3404,8 @@
                           teacherWeeklyAvail += avail;
                       });
 
-                      const weeklyNoDoubleCap = allowDoublePeriods ? Infinity : subjectPerDayCap;
+                      const isDoubleSub = doublePeriodSubjects[className]?.[subject] || false;
+                      const weeklyNoDoubleCap = (allowDoublePeriods || isDoubleSub) ? Infinity : subjectPerDayCap;
                       const feasible = Math.max(0, Math.min(requested, classWeeklyAvail, teacherWeeklyAvail, weeklyNoDoubleCap));
                       requestedCounts[className][subject] = feasible;
                       if (feasible < requested) {
@@ -3771,11 +3793,16 @@
                   };
 
                   // Helper function to check if we can place a subject in a slot
-                  const canPlaceSubject = (className, subject, teacher, day, periodIndex, currentPlacedCount, relaxConstraints = false) => {
+                  const canPlaceSubject = (className, subject, teacher, day, periodIndex, currentPlacedCount, relaxConstraints = false, checkNextSlot = false) => {
                       // Check if already placed enough periods for this subject
                       const requestedCount = periodsToAssignPerSubject[className]?.[subject] || 0;
-                      if (requestedCount === 0 || currentPlacedCount >= requestedCount) {
+                      const needed = requestedCount - currentPlacedCount;
+                      if (requestedCount === 0 || needed <= 0) {
                           return false; // Don't place if no periods requested or already placed enough
+                      }
+                      
+                      if (checkNextSlot && needed < 2) {
+                          return false; // Need at least 2 to check next slot
                       }
 
                       // Check teacher start time
@@ -3805,6 +3832,27 @@
                       if (!allowDoublePeriods && !relaxConstraints) {
                           const isSubjectAlreadyOnDay = newTimetable[className][day].some((lesson, index) => index !== periodIndex && lesson.subject === subject);
                           if (isSubjectAlreadyOnDay) return false;
+                      }
+                      
+                      // For double periods (pairs), also check the NEXT slot
+                      if (checkNextSlot) {
+                          const nextPeriodIndex = periodIndex + 1;
+                          
+                          // 1. Must not be end of day
+                          if (nextPeriodIndex >= periodsForDay) return false;
+                          
+                          // 2. Must not be lunch break in between
+                          if (nextPeriodIndex === lunchBreakPeriod - 1) return false;
+                          
+                          // 3. Class must be free
+                          if (newTimetable[className][day][nextPeriodIndex].subject !== 'Free') return false;
+                          
+                          // 4. Teacher must be free
+                          if (teacherSchedule[teacher]?.[day]?.[nextPeriodIndex] !== null) return false;
+                          
+                          // 5. Last period restriction for the second slot
+                          const isNextLastPeriod = nextPeriodIndex === periodsForDay - 1;
+                          if (!relaxConstraints && isNextLastPeriod && isRestrictedSubject) return false;
                       }
 
                       return true;
@@ -3866,7 +3914,9 @@
                                       continue; // Already placed enough - DO NOT place more
                                   }
 
-                                  // Try to place ONE period for this subject
+                                  // Try to place ONE period (or a PAIR if it's a double period subject) for this subject
+                                  const isDouble = doublePeriodSubjects[className]?.[subject] || false;
+
                                   for (const slot of shuffledSlots) {
                                       const { day, periodIndex } = slot;
                                       
@@ -3878,6 +3928,22 @@
                                       // Double-check we haven't exceeded the limit (safety check)
                                       if (assignmentsPlaced[className][subject] >= requestedCount) {
                                           break; // Stop trying to place this subject
+                                      }
+
+                                      // Try placing as a DOUBLE period first if requested and we need at least 2
+                                      if (isDouble && (requestedCount - assignmentsPlaced[className][subject]) >= 2) {
+                                          if (canPlaceSubject(className, subject, teacher, day, periodIndex, assignmentsPlaced[className][subject], shouldRelaxConstraints, true)) {
+                                              // Place BOTH
+                                              newTimetable[className][day][periodIndex] = { subject, teacher };
+                                              teacherSchedule[teacher][day][periodIndex] = { className, subject };
+                                              newTimetable[className][day][periodIndex + 1] = { subject, teacher };
+                                              teacherSchedule[teacher][day][periodIndex + 1] = { className, subject };
+                                              assignmentsPlaced[className][subject] += 2;
+                                              anyPlacedInRound = true;
+                                              
+                                              console.log(`  ✓ Placed DOUBLE ${subject} for ${className} (${assignmentsPlaced[className][subject]}/${requestedCount}) on ${day} P${periodIndex + 1}-${periodIndex + 2}`);
+                                              break;
+                                          }
                                       }
 
                                       // Check if we can place this subject here (pass current count + relaxation flag)
@@ -3972,6 +4038,12 @@
                       // Try to fill each free slot
                       remainingFreeSlots.forEach(slot => {
                           const { day, periodIndex } = slot;
+                          
+                          // If this slot was already filled by a double period placement from a previous slot
+                          if (newTimetable[className][day][periodIndex].subject !== 'Free') {
+                              return;
+                          }
+
                           const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
                           const isLastPeriod = periodIndex === periodsForDay - 1;
                           
@@ -3986,52 +4058,33 @@
                                   continue;
                               }
                               
-                              // Check teacher start time
-                              const teacherStart = teacherStartPeriod[teacher] || 1;
-                              if (periodIndex < teacherStart - 1) {
-                                  reasons.push(`${subject}: Teacher ${teacher} not available (starts at P${teacherStart})`);
-                                  continue;
-                              }
-                              
-                              // Check last period restrictions
-                              const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
-                              if (isLastPeriod && isRestrictedSubject) {
-                                  reasons.push(`${subject}: Restricted from last period`);
-                                  continue;
-                              }
-                              
-                              // Check teacher availability
-                              const isTeacherSlotFree = teacherSchedule[teacher]?.[day]?.[periodIndex] === null;
-                              if (!isTeacherSlotFree) {
-                                  const teacherConflict = teacherSchedule[teacher]?.[day]?.[periodIndex];
-                                  reasons.push(`${subject}: Teacher ${teacher} busy with ${teacherConflict?.className || 'another class'}`);
-                                  continue;
-                              }
-                              
-                              // NEW: Check if assigning this period would violate teacher free period constraint
-                              if (ensureTeacherFreePeriod) {
-                                  const teacherFreePeriods = countTeacherFreePeriods(teacher, day);
-                                  // If teacher currently has only 1 free period and we're about to fill it, skip
-                                  if (teacherFreePeriods <= 1) {
-                                      reasons.push(`${subject}: Teacher ${teacher} needs at least one free period`);
-                                      continue;
+                              const isDouble = doublePeriodSubjects[className]?.[subject] || false;
+
+                              // Try placing as a DOUBLE period first if requested
+                              if (isDouble) {
+                                  if (canPlaceSubject(className, subject, teacher, day, periodIndex, assignmentsPlaced[className][subject], true, true)) {
+                                      // Place BOTH
+                                      newTimetable[className][day][periodIndex] = { subject, teacher };
+                                      teacherSchedule[teacher][day][periodIndex] = { className, subject };
+                                      newTimetable[className][day][periodIndex + 1] = { subject, teacher };
+                                      teacherSchedule[teacher][day][periodIndex + 1] = { className, subject };
+                                      assignmentsPlaced[className][subject] += 2;
+                                      placed = true;
+                                      console.log(`  ✅ Auto-filled DOUBLE ${className} ${day} P${periodIndex + 1}-${periodIndex + 2} with ${subject} (${teacher})`);
+                                      break;
                                   }
                               }
-                              
-                              // Check double period restriction
-                              const isSubjectAlreadyOnDay = !allowDoublePeriods && newTimetable[className][day].some((lesson, index) => index !== periodIndex && lesson.subject === subject);
-                              if (isSubjectAlreadyOnDay) {
-                                  reasons.push(`${subject}: Already scheduled on ${day} (no double periods mode)`);
-                                  continue;
+
+                              // Fallback to single placement
+                              if (canPlaceSubject(className, subject, teacher, day, periodIndex, assignmentsPlaced[className][subject], true, false)) {
+                                  // Place the assignment
+                                  newTimetable[className][day][periodIndex] = { subject, teacher };
+                                  teacherSchedule[teacher][day][periodIndex] = { className, subject };
+                                  assignmentsPlaced[className][subject]++;
+                                  placed = true;
+                                  console.log(`  ✅ Auto-filled ${className} ${day} P${periodIndex + 1} with ${subject} (${teacher})`);
+                                  break;
                               }
-                              
-                              // ALL CHECKS PASSED - Place the period!
-                              newTimetable[className][day][periodIndex] = { subject, teacher };
-                              teacherSchedule[teacher][day][periodIndex] = { className, subject };
-                              assignmentsPlaced[className][subject]++;
-                              placed = true;
-                              console.log(`  ✅ Auto-filled ${className} ${day} P${periodIndex + 1} with ${subject} (${teacher})`);
-                              break;
                           }
                           
                           // If couldn't place anything, record the reason
@@ -6059,7 +6112,8 @@
                                         <tr>
                                           <th className="px-4 py-3 text-left font-bold text-gray-800 border-r border-gray-200">Subject</th>
                                           <th className="px-4 py-3 text-center font-bold text-blue-700 border-r border-gray-200">Teacher</th>
-                                          <th className="px-4 py-3 text-center font-bold text-green-700">Periods/Week</th>
+                                          <th className="px-4 py-3 text-center font-bold text-green-700 border-r border-gray-200">Periods/Week</th>
+                                          <th className="px-4 py-3 text-center font-bold text-purple-700">Pair (Double)</th>
                                         </tr>
                                       </thead>
                                       <tbody className="bg-white divide-y divide-gray-100">
@@ -6074,7 +6128,7 @@
                                                 className="w-full text-sm hover:border-blue-400 focus:border-blue-500 transition-colors"
                                               />
                                             </td>
-                                            <td className="px-3 py-3">
+                                            <td className="px-3 py-3 border-r border-gray-200">
                                               <Input
                                                 type="number"
                                                 value={subjectPeriodsPerWeek[cls]?.[subject] || 0}
@@ -6084,11 +6138,19 @@
                                                 min="0"
                                               />
                                             </td>
+                                            <td className="px-3 py-3 text-center">
+                                              <input
+                                                type="checkbox"
+                                                checked={doublePeriodSubjects[cls]?.[subject] || false}
+                                                onChange={(e) => handleDoublePeriodToggle(cls, subject, e.target.checked)}
+                                                className="h-5 w-5 text-purple-600 border-gray-300 rounded focus:ring-2 focus:ring-purple-500 cursor-pointer transition-all hover:scale-110"
+                                              />
+                                            </td>
                                           </tr>
                                         ))}
                                         {/* Total Lectures Row */}
                                         <tr className="bg-gradient-to-r from-green-100 to-emerald-50 border-t-2 border-green-400">
-                                          <td colSpan="2" className="px-4 py-3 text-right font-bold text-gray-900 text-base">
+                                          <td colSpan="3" className="px-4 py-3 text-right font-bold text-gray-900 text-base">
                                             Total Lectures in Week:
                                           </td>
                                           <td className="px-3 py-3">
@@ -6915,181 +6977,6 @@
               />
             </div>
           );
-        };
-
-        // SECTION CSV EXPORT/IMPORT HELPERS
-        const exportSchoolDetailsCSV = () => {
-          const rows = [];
-          rows.push(['Teachers', teachers.join(';')]);
-          rows.push(['Classes', classes.join(';')]);
-          rows.push(['Subjects', subjects.join(';')]);
-          rows.push(['PeriodsPerDay', periodsPerDay]);
-          rows.push(['HalfDayPeriods', halfDayPeriods]);
-          rows.push(['WorkingDays', workingDays]);
-          rows.push(['OffDays', offDays.join(';')]);
-          rows.push(['HalfDays', halfDays.join(';')]);
-          rows.push(['LunchBreakPeriod', lunchBreakPeriod]);
-          rows.push(['BreakLabel', breakLabel]);
-          rows.push(['EnsureTeacherFreePeriod', ensureTeacherFreePeriod]);
-          const csv = 'Setting,Value\n' + rows.map(r => `${r[0]},"${String(r[1]).replace(/"/g,'""')}"`).join('\n');
-          const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = 'school-details.csv';
-          document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        };
-
-        const importSchoolDetailsCSV = (e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            try {
-              const textRaw = String(ev.target.result||'');
-              const text = textRaw.replace(/^\ufeff/, '');
-              const lines = text.split(/\r?\n/).map(l => l.trim());
-              const nonEmpty = lines.filter(Boolean);
-
-              // Matrix header detection
-              const idxHeader = nonEmpty.findIndex(l => /^,?Teachers,Classes,Subjects,PeriodsPerDay,HalfDayPeriods,WorkingDays,OffDays,HalfDays,LunchBreakPeriod,BreakLabel,EnsureTeacherFreePeriod(,|$)/i.test(l));
-              if (idxHeader !== -1 && nonEmpty[idxHeader+1]) {
-                const parts = nonEmpty[idxHeader+1].split(',').map(s => s.replace(/^"|"$/g,'').trim());
-                const get = (i) => parts[i] || '';
-                setTeachers(get(1).split(';').filter(Boolean));
-                setClasses(get(2).split(';').filter(Boolean));
-                setSubjects(get(3).split(';').filter(Boolean));
-                setPeriodsPerDay(Math.max(1, parseInt(get(4))||1));
-                setHalfDayPeriods(Math.max(0, parseInt(get(5))||0));
-                setWorkingDays(Math.max(1, parseInt(get(6))||1));
-                setOffDays(get(7).split(';').filter(Boolean));
-                setHalfDays(get(8).split(';').filter(Boolean));
-                setLunchBreakPeriod(Math.max(0, parseInt(get(9))||0));
-                setBreakLabel(get(10));
-                setEnsureTeacherFreePeriod(String(get(11)).toLowerCase()==='true' || get(11)==='1');
-                alert('School details imported');
-              } else {
-                // Legacy key,value rows (with optional header)
-                const start = nonEmpty[0] && /setting\s*,\s*value/i.test(nonEmpty[0]) ? 1 : 0;
-                const map = {};
-                nonEmpty.slice(start).forEach(line => {
-                  const m = line.match(/^([^,]+),(.+)$/);
-                  if (!m) return;
-                  const key = m[1].trim();
-                  const val = m[2].trim().replace(/^"|"$/g,'');
-                  map[key] = val;
-                });
-                if (map.Teachers) setTeachers(map.Teachers.split(';').filter(Boolean));
-                if (map.Classes) setClasses(map.Classes.split(';').filter(Boolean));
-                if (map.Subjects) setSubjects(map.Subjects.split(';').filter(Boolean));
-                if (map.PeriodsPerDay) setPeriodsPerDay(Math.max(1, parseInt(map.PeriodsPerDay)||1));
-                if (map.HalfDayPeriods) setHalfDayPeriods(Math.max(0, parseInt(map.HalfDayPeriods)||0));
-                if (map.WorkingDays) setWorkingDays(Math.max(1, Math.min(7, parseInt(map.WorkingDays)||1)));
-                if (map.OffDays) setOffDays(map.OffDays.split(';').filter(Boolean));
-                if (map.HalfDays) setHalfDays(map.HalfDays.split(';').filter(Boolean));
-                if (map.LunchBreakPeriod!==undefined) setLunchBreakPeriod(Math.max(0, parseInt(map.LunchBreakPeriod)||0));
-                if (map.BreakLabel!==undefined) setBreakLabel(map.BreakLabel);
-                if (map.EnsureTeacherFreePeriod!==undefined) setEnsureTeacherFreePeriod(map.EnsureTeacherFreePeriod==='true');
-                alert('School details imported');
-              }
-            } catch(err){
-              alert('Failed to import School Details CSV');
-            } finally {
-              e.target.value = '';
-            }
-          };
-          reader.readAsText(file);
-        };
-
-        const exportAssignmentsCSV = () => {
-          // Build header: blank, Class, subjects..., Total
-          const header = ['','Class', ...subjects, 'Total'];
-          const rows = [header];
-          classes.forEach((cls, idx) => {
-            const teacherRow = [String(idx + 1), cls];
-            subjects.forEach(sub => {
-              teacherRow.push(assignments?.[cls]?.[sub] || '');
-            });
-            teacherRow.push('');
-            rows.push(teacherRow);
-
-            const periodsRow = ['', ''];
-            let total = 0;
-            subjects.forEach(sub => {
-              const periods = Math.max(0, parseInt(subjectPeriodsPerWeek?.[cls]?.[sub]) || 0);
-              periodsRow.push(String(periods));
-              total += periods;
-            });
-            periodsRow.push(String(total));
-            rows.push(periodsRow);
-          });
-
-          const escapeCell = (v) => `"${String(v ?? '').replace(/\"/g,'\"\"')}"`;
-          const csv = rows.map(r => r.map(escapeCell).join(',')).join('\r\n');
-          const bom = '\ufeff';
-          const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
-          const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download='Assignments_Matrix.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        };
-
-        const importAssignmentsCSV = (e) => {
-          const file = e.target.files?.[0]; if(!file) return;
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            try {
-              const textRaw = String(ev.target.result||'');
-              const text = textRaw.replace(/^\ufeff/, '');
-              const lines = text.split(/\r?\n/).map(l=>l.trim());
-              const nonEmpty = lines.filter(Boolean);
-
-              const newAssignments = {};
-              const newPeriods = {};
-
-              // Detect matrix header: blank,Class,subjects...,Total
-              const header = nonEmpty[0] || '';
-              const headerParts = header.split(',').map(s => s.replace(/^"|"$/g,''));
-              const isMatrix = headerParts.length >= 3 && headerParts[1] === 'Class';
-              if (isMatrix) {
-                const subjectsFromHeader = headerParts.slice(2, -1);
-                for (let i = 1; i < nonEmpty.length; i += 2) {
-                  const teacherRow = (nonEmpty[i] || '').split(',').map(s => s.replace(/^"|"$/g,''));
-                  const periodsRow = (nonEmpty[i+1] || '').split(',').map(s => s.replace(/^"|"$/g,''));
-                  if (teacherRow.length < 2) continue;
-                  const cls = teacherRow[1];
-                  if (!cls) continue;
-                  if (!newAssignments[cls]) newAssignments[cls] = {};
-                  if (!newPeriods[cls]) newPeriods[cls] = {};
-                  subjectsFromHeader.forEach((sub, idx) => {
-                    const teacher = teacherRow[2 + idx] || '';
-                    const periods = Math.max(0, parseInt(periodsRow[2 + idx])||0);
-                    if (sub) {
-                      newAssignments[cls][sub] = teacher;
-                      newPeriods[cls][sub] = periods;
-                    }
-                  });
-                }
-              } else {
-                // Legacy: Class,Subject,Teacher,PeriodsPerWeek
-                if (!header.toLowerCase().includes('class,subject,teacher')) throw new Error('Invalid header');
-                nonEmpty.slice(1).forEach(line => {
-                  const parts = line.split(',');
-                  if (parts.length < 4) return;
-                  const cls = parts[0].trim();
-                  const sub = parts[1].trim();
-                  const teacher = parts[2].trim().replace(/^"|"$/g,'');
-                  const periods = Math.max(0, parseInt(parts[3])||0);
-                  if (!newAssignments[cls]) newAssignments[cls] = {};
-                  if (!newPeriods[cls]) newPeriods[cls] = {};
-                  newAssignments[cls][sub] = teacher;
-                  newPeriods[cls][sub] = periods;
-                });
-              }
-
-              setAssignments(newAssignments);
-              setSubjectPeriodsPerWeek(newPeriods);
-              alert('Assignments imported');
-            } catch(err){ alert('Failed to import Assignments CSV'); }
-            finally { e.target.value=''; }
-          };
-          reader.readAsText(file);
         };
 
         
