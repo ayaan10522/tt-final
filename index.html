@@ -3809,11 +3809,11 @@
                       const teacherStart = teacherStartPeriod[teacher] || 1;
                       if (periodIndex < teacherStart - 1) return false;
                       
-                      // Check last period restrictions (can be relaxed)
+                      // Check last period restrictions (NEVER relaxed)
                       const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
                       const isLastPeriod = periodIndex === periodsForDay - 1;
                       const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
-                      if (!relaxConstraints && isLastPeriod && isRestrictedSubject) return false;
+                      if (isLastPeriod && isRestrictedSubject) return false;
 
                       // Check teacher availability
                       const isTeacherSlotFree = teacherSchedule[teacher]?.[day]?.[periodIndex] === null;
@@ -3850,9 +3850,9 @@
                           // 4. Teacher must be free
                           if (teacherSchedule[teacher]?.[day]?.[nextPeriodIndex] !== null) return false;
                           
-                          // 5. Last period restriction for the second slot
+                          // 5. Last period restriction for the second slot (NEVER relaxed)
                           const isNextLastPeriod = nextPeriodIndex === periodsForDay - 1;
-                          if (!relaxConstraints && isNextLastPeriod && isRestrictedSubject) return false;
+                          if (isNextLastPeriod && isRestrictedSubject) return false;
                       }
 
                       return true;
@@ -4171,7 +4171,13 @@
                                           if (p === lunchBreakPeriod - 1) continue;
                                           const cell = newTimetable[className][day][p];
                                           if (cell.subject === 'Free') {
-                                              // Relax: ignore ensureTeacherFreePeriod/last-period restrictions; only require teacher slot free or free-ish
+                                              // Still enforce last-period restriction!
+                                              const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
+                                              const isLastPeriod = p === periodsForDay - 1;
+                                              const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
+                                              if (isLastPeriod && isRestrictedSubject) continue;
+                                              
+                                              // Relax: ignore ensureTeacherFreePeriod; only require teacher slot free or free-ish
                                               const teacherSlot = teacherSchedule[teacher]?.[day]?.[p];
                                               const teacherAvailable = teacherSlot === null || (teacherSlot && (teacherSlot.className === 'Free' || teacherSlot.subject === 'Free'));
                                               // Also allow if teacher is truly unassigned
@@ -4200,6 +4206,12 @@
                                               if (p === lunchBreakPeriod - 1) continue;
                                               const cell = newTimetable[className][day][p];
                                               if (cell && overfilled.includes(cell.subject)) {
+                                                  // Still enforce last-period restriction for our deficit subject!
+                                                  const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
+                                                  const isLastPeriod = p === periodsForDay - 1;
+                                                  const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
+                                                  if (isLastPeriod && isRestrictedSubject) continue;
+                                                  
                                                   const occupiedTeacherSlot = teacherSchedule[teacher]?.[day]?.[p];
                                                   const teacherFreeHere = occupiedTeacherSlot === null || (occupiedTeacherSlot && (occupiedTeacherSlot.className === 'Free' || occupiedTeacherSlot.subject === 'Free'));
                                                   if (teacherFreeHere) {
@@ -4242,12 +4254,19 @@
                                                       for (let altP = 0; altP < altPeriodsForDay; altP++) {
                                                           if (altP === lunchBreakPeriod - 1) continue;
                                                           if (newTimetable[className][altDay][altP].subject !== 'Free') continue;
+                                                          
+                                                          // Check if blocking subject is restricted from last periods
+                                                          const isAltLastPeriod = altP === altPeriodsForDay - 1;
+                                                          const isBlockingSubjectRestricted = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === blockingSubject);
+                                                          if (isAltLastPeriod && isBlockingSubjectRestricted) continue;
+                                                          
                                                           // Check blocking teacher availability on alt slot
                                                           const blockingTeacherFree = teacherSchedule[blockingTeacher]?.[altDay]?.[altP] === null || (teacherSchedule[blockingTeacher]?.[altDay]?.[altP] && (teacherSchedule[blockingTeacher][altDay][altP].className === 'Free' || teacherSchedule[blockingTeacher][altDay][altP].subject === 'Free'));
                                                           // Respect teacher start time for blocking teacher
                                                           const blockingTeacherStart = (teacherStartPeriod[blockingTeacher] || 1) - 1;
                                                           if (altP < blockingTeacherStart) continue;
                                                           if (!blockingTeacherFree) continue;
+                                                          
                                                           // Move blocking subject
                                                           newTimetable[className][altDay][altP] = { subject: blockingSubject, teacher: blockingTeacher };
                                                           teacherSchedule[blockingTeacher][altDay][altP] = { className, subject: blockingSubject };
@@ -4262,7 +4281,34 @@
                                                       if (relocated) break;
                                                   }
                                                   if (relocated) {
-                                                      // Now try placing our deficit subject at freed slot
+                                                      // Now try placing our deficit subject at freed slot (check last-period restriction!)
+                                                      const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
+                                                      const isFreedSlotLastPeriod = p === periodsForDay - 1;
+                                                      const isDeficitSubjectRestricted = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
+                                                      
+                                                      if (isFreedSlotLastPeriod && isDeficitSubjectRestricted) {
+                                                          // Can't place here, undo relocation!
+                                                          // Put blocking subject back
+                                                          newTimetable[className][day][p] = { subject: blockingSubject, teacher: blockingTeacher };
+                                                          teacherSchedule[blockingTeacher][day][p] = { className, subject: blockingSubject };
+                                                          // Find and remove the relocated one
+                                                          for (const altDay of workingDayLabels) {
+                                                              const altPeriodsForDay = halfDays.includes(altDay) ? halfDayPeriods : periodsPerDay;
+                                                              for (let altP = 0; altP < altPeriodsForDay; altP++) {
+                                                                  if (altP === lunchBreakPeriod - 1) continue;
+                                                                  if (newTimetable[className][altDay][altP].subject === blockingSubject && 
+                                                                      newTimetable[className][altDay][altP].teacher === blockingTeacher && 
+                                                                      !(altDay === day && altP === p)) {
+                                                                      newTimetable[className][altDay][altP] = { subject: 'Free', teacher: null };
+                                                                      if (teacherSchedule[blockingTeacher] && teacherSchedule[blockingTeacher][altDay]) {
+                                                                          teacherSchedule[blockingTeacher][altDay][altP] = null;
+                                                                      }
+                                                                  }
+                                                              }
+                                                          }
+                                                          continue; // Try another blocking subject
+                                                      }
+                                                      
                                                       const teacherFreeHereAfter = teacherSchedule[teacher]?.[day]?.[p] === null || (teacherSchedule[teacher]?.[day]?.[p] && (teacherSchedule[teacher][day][p].className === 'Free' || teacherSchedule[teacher][day][p].subject === 'Free'));
                                                       if (teacherFreeHereAfter) {
                                                           newTimetable[className][day][p] = { subject, teacher };
@@ -4290,6 +4336,12 @@
                                                   const oldPlaced = assignmentsPlaced[className][oldSubject] || 0;
                                                   const oldRequested = periodsToAssignPerSubject[className][oldSubject] || 0;
                                                   if (oldPlaced > oldRequested) {
+                                                      // Still enforce last-period restriction!
+                                                      const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
+                                                      const isLastPeriod = p === periodsForDay - 1;
+                                                      const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
+                                                      if (isLastPeriod && isRestrictedSubject) continue;
+                                                      
                                                       // Replace over-placed subject with our deficit subject, even if teacher is currently busy elsewhere
                                                       newTimetable[className][day][p] = { subject, teacher };
                                                       // Free the old teacher at this slot
