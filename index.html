@@ -4081,6 +4081,11 @@
                                   continue;
                               }
                               
+                              // Check if we already placed enough of this subject (NO EXTRA PERIODS)
+                              const requested = periodsToAssignPerSubject[className][subject] || 0;
+                              const current = assignmentsPlaced[className][subject] || 0;
+                              if (current >= requested) continue;
+                              
                               const isDouble = doublePeriodSubjects[className]?.[subject] || false;
                               const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
                               if (isLastPeriod && isRestrictedSubject) continue; // Skip restricted subjects for last period
@@ -4090,8 +4095,8 @@
                               const teacherAvailable = teacherSlot === null || (teacherSlot && (teacherSlot.className === 'Free' || teacherSlot.subject === 'Free'));
                               if (!teacherAvailable) continue;
 
-                              // Try placing as a DOUBLE period first if requested
-                              if (isDouble && periodIndex + 1 < periodsForDay) {
+                              // Try placing as a DOUBLE period first if requested AND we still need 2+ periods
+                              if (isDouble && periodIndex + 1 < periodsForDay && requested - current >= 2) {
                                   const nextPeriodIndex = periodIndex + 1;
                                   // Check next slot is free and not restricted for this subject
                                   const nextIsLastPeriod = nextPeriodIndex === periodsForDay - 1;
@@ -4113,13 +4118,15 @@
                                   }
                               }
 
-                              // Fallback to single placement
-                              newTimetable[className][day][periodIndex] = { subject, teacher };
-                              teacherSchedule[teacher][day][periodIndex] = { className, subject };
-                              assignmentsPlaced[className][subject]++;
-                              placed = true;
-                              console.log(`  ✅ Auto-filled ${className} ${day} P${periodIndex + 1} with ${subject} (${teacher})`);
-                              break;
+                              // Fallback to single placement (only if we still need at least 1 period)
+                              if (requested - current >= 1) {
+                                  newTimetable[className][day][periodIndex] = { subject, teacher };
+                                  teacherSchedule[teacher][day][periodIndex] = { className, subject };
+                                  assignmentsPlaced[className][subject]++;
+                                  placed = true;
+                                  console.log(`  ✅ Auto-filled ${className} ${day} P${periodIndex + 1} with ${subject} (${teacher})`);
+                                  break;
+                              }
                           }
                           
                           // If couldn't place anything, record the reason
@@ -4269,6 +4276,15 @@
                                               }
                                               
                                               if (movedOldSubject) {
+                                                  // Check that old subject isn't going under its requested count
+                                                  const oldSubjectRequested = periodsToAssignPerSubject[className][oldSubject] || 0;
+                                                  if ((assignmentsPlaced[className][oldSubject] - 1) < oldSubjectRequested) {
+                                                      // Undo the move
+                                                      newTimetable[className][altDay][altP] = { subject: 'Free', teacher: null };
+                                                      teacherSchedule[oldTeacher][altDay][altP] = null;
+                                                      continue;
+                                                  }
+                                                  
                                                   // Now place our deficit subject here
                                                   newTimetable[className][day][p] = { subject, teacher };
                                                   teacherSchedule[teacher][day][p] = { className, subject };
@@ -4313,13 +4329,14 @@
                                                           if (altP < blockingTeacherStart) continue;
                                                           if (!blockingTeacherFree) continue;
                                                           
+                                                          // Check that blocking subject isn't going under requested count if we move it (it's same count, so okay, but let's check we don't have extra)
                                                           // Move blocking subject
                                                           newTimetable[className][altDay][altP] = { subject: blockingSubject, teacher: blockingTeacher };
                                                           teacherSchedule[blockingTeacher][altDay][altP] = { className, subject: blockingSubject };
                                                           // Free original blocking slot to place our deficit subject
                                                           newTimetable[className][day][p] = { subject: 'Free', teacher: null };
                                                           if (teacherSchedule[blockingTeacher] && teacherSchedule[blockingTeacher][day]) {
-                                                              teacherSchedule[blockingTeacher][day][p] = { className: 'Free', subject: 'Free' };
+                                                              teacherSchedule[blockingTeacher][day][p] = null;
                                                           }
                                                           relocated = true;
                                                           break;
@@ -4433,53 +4450,32 @@
                       console.log('🧮 Repair phase completed. Remaining deficit:', totalDeficit);
                   }
 
-                  // 5c. FINAL FREE-PERIOD FILLING PHASE: Fill any remaining free periods with any possible subject (no deficit required)
-                  console.log('🎯 PHASE 2c: Final free-period filling...');
+                  // FINAL VERIFICATION AND FIX: Ensure NO subject has MORE than requested periods!
                   classes.forEach(className => {
-                      const classAssignments = assignments[className] || {};
-                      const subjectsForClass = Object.keys(periodsToAssignPerSubject[className] || {})
-                          .filter(sub => periodsToAssignPerSubject[className][sub] >= 0);
-                      
-                      // Identify all remaining free slots for this class
-                      const remainingFreeSlots = [];
-                      workingDayLabels.forEach(day => {
-                          const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
-                          for (let periodIndex = 0; periodIndex < periodsForDay; periodIndex++) {
-                              if (newTimetable[className][day][periodIndex].subject === 'Free') {
-                                  remainingFreeSlots.push({ day, periodIndex });
+                      const classSubjects = Object.keys(periodsToAssignPerSubject[className] || {});
+                      classSubjects.forEach(subject => {
+                          const requested = periodsToAssignPerSubject[className][subject] || 0;
+                          let current = assignmentsPlaced[className][subject] || 0;
+                          if (current > requested) {
+                              const extra = current - requested;
+                              let removed = 0;
+                              for (const day of workingDayLabels) {
+                                  if (removed >= extra) break;
+                                  const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
+                                  for (let p = 0; p < periodsForDay; p++) {
+                                      if (removed >= extra) break;
+                                      if (newTimetable[className][day][p].subject === subject) {
+                                          const teacher = newTimetable[className][day][p].teacher;
+                                          // Mark as free
+                                          newTimetable[className][day][p] = { subject: 'Free', teacher: null };
+                                          if (teacherSchedule[teacher] && teacherSchedule[teacher][day]) {
+                                              teacherSchedule[teacher][day][p] = null;
+                                          }
+                                          assignmentsPlaced[className][subject]--;
+                                          removed++;
+                                      }
+                                  }
                               }
-                          }
-                      });
-                      
-                      if (remainingFreeSlots.length === 0) return;
-                      
-                      console.log(`📍 ${className}: Final fill attempt for ${remainingFreeSlots.length} free periods...`);
-                      
-                      remainingFreeSlots.forEach(slot => {
-                          const { day, periodIndex } = slot;
-                          if (newTimetable[className][day][periodIndex].subject !== 'Free') return;
-                          
-                          const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
-                          const isLastPeriod = periodIndex === periodsForDay - 1;
-                          
-                          for (const subject of subjectsForClass) {
-                              const teacher = classAssignments[subject];
-                              if (!teacher) continue;
-                              
-                              const isRestrictedSubject = lastPeriodSubjectRestrictions.some(r => r.className === className && r.subject === subject);
-                              if (isLastPeriod && isRestrictedSubject) continue;
-                              
-                              // Check teacher availability
-                              const teacherSlot = teacherSchedule[teacher]?.[day]?.[periodIndex];
-                              const teacherAvailable = teacherSlot === null || (teacherSlot && (teacherSlot.className === 'Free' || teacherSlot.subject === 'Free'));
-                              if (!teacherAvailable) continue;
-                              
-                              // Place the subject
-                              newTimetable[className][day][periodIndex] = { subject, teacher };
-                              teacherSchedule[teacher][day][periodIndex] = { className, subject };
-                              assignmentsPlaced[className][subject]++;
-                              console.log(`  ✅ Final-filled ${className} ${day} P${periodIndex + 1} with ${subject} (${teacher})`);
-                              break;
                           }
                       });
                   });
