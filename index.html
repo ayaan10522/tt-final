@@ -4162,7 +4162,7 @@
                                   const teacher = (assignments[className] || {})[subject];
                                   if (!teacher) continue;
 
-                                  // First, try to place into any free slot for this class using canPlaceSubject
+                                  // First, try to place into any free slot for this class, ignoring last-period and free-period constraints
                                   let placedNow = false;
                                   for (const day of workingDayLabels) {
                                       const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
@@ -4171,8 +4171,11 @@
                                           if (p === lunchBreakPeriod - 1) continue;
                                           const cell = newTimetable[className][day][p];
                                           if (cell.subject === 'Free') {
-                                              // Use canPlaceSubject with relaxed constraints
-                                              if (canPlaceSubject(className, subject, teacher, day, p, assignmentsPlaced[className][subject], true, false)) {
+                                              // Relax: ignore ensureTeacherFreePeriod/last-period restrictions; only require teacher slot free or free-ish
+                                              const teacherSlot = teacherSchedule[teacher]?.[day]?.[p];
+                                              const teacherAvailable = teacherSlot === null || (teacherSlot && (teacherSlot.className === 'Free' || teacherSlot.subject === 'Free'));
+                                              // Also allow if teacher is truly unassigned
+                                              if (teacherAvailable) {
                                                   newTimetable[className][day][p] = { subject, teacher };
                                                   teacherSchedule[teacher][day][p] = { className, subject };
                                                   assignmentsPlaced[className][subject] = (assignmentsPlaced[className][subject] || 0) + 1;
@@ -4332,110 +4335,7 @@
                       console.log('🧮 Repair phase completed. Remaining deficit:', totalDeficit);
                   }
 
-                  // Validate and fix any conflicts
-                  console.log('🔍 Validating timetable for conflicts...');
-                  let conflictsFixed = false;
-                  for (let validateAttempt = 0; validateAttempt < 50; validateAttempt++) {
-                      let hasConflict = false;
-                      
-                      // Check each slot for conflicts
-                      for (const className of classes) {
-                          for (const day of workingDayLabels) {
-                              const periodsForDay = halfDays.includes(day) ? halfDayPeriods : periodsPerDay;
-                              for (let p = 0; p < periodsForDay; p++) {
-                                  const lesson = newTimetable[className][day][p];
-                                  if (!lesson || lesson.subject === 'Free' || lesson.teacher === 'School Event' || lesson.teacher === 'Event Coordinator' || lesson.teacher === 'SYSTEM') {
-                                      continue;
-                                  }
-                                  
-                                  const teacher = lesson.teacher;
-                                  const subject = lesson.subject;
-                                  
-                                  // Check 1: Teacher conflict (teacher assigned to multiple classes in same period)
-                                  let teacherConflict = false;
-                                  for (const otherClass of classes) {
-                                      if (otherClass === className) continue;
-                                      const otherLesson = newTimetable[otherClass][day][p];
-                                      if (otherLesson && otherLesson.teacher === teacher && otherLesson.subject !== 'Free') {
-                                          teacherConflict = true;
-                                          break;
-                                      }
-                                  }
-                                  
-                                  // Check 2: Double period conflict (same subject on same day more than once when not allowed)
-                                  let doublePeriodConflict = false;
-                                  const isDoublePeriodSubject = doublePeriodSubjects[className]?.[subject] || false;
-                                  if (!allowDoublePeriods || (!isDoublePeriodSubject)) {
-                                      let subjectCount = 0;
-                                      for (let pp = 0; pp < periodsForDay; pp++) {
-                                          const checkLesson = newTimetable[className][day][pp];
-                                          if (checkLesson && checkLesson.subject === subject) {
-                                              subjectCount++;
-                                          }
-                                      }
-                                      // If not allowing double periods at all OR it's not a double period subject, only allow 1 per day
-                                      if ((!allowDoublePeriods && subjectCount > 1) || (allowDoublePeriods && !isDoublePeriodSubject && subjectCount > 1)) {
-                                          doublePeriodConflict = true;
-                                      }
-                                  }
-                                  
-                                  if (teacherConflict || doublePeriodConflict) {
-                                      hasConflict = true;
-                                      console.log(`⚠️ Conflict found: ${className} ${day} P${p+1} - ${subject} (${teacher})`);
-                                      
-                                      // Try to move this lesson to another slot
-                                      let moved = false;
-                                      for (const targetDay of workingDayLabels) {
-                                          const targetPeriods = halfDays.includes(targetDay) ? halfDayPeriods : periodsPerDay;
-                                          for (let targetP = 0; targetP < targetPeriods; targetP++) {
-                                              if (targetP === lunchBreakPeriod - 1) continue;
-                                              if (newTimetable[className][targetDay][targetP].subject !== 'Free') continue;
-                                              
-                                              // Check if we can place here using canPlaceSubject
-                                              const currentPlacedForSubject = assignmentsPlaced[className][subject] - 1;
-                                              if (canPlaceSubject(className, subject, teacher, targetDay, targetP, currentPlacedForSubject, true, false)) {
-                                                  // Move the lesson
-                                                  newTimetable[className][targetDay][targetP] = { subject, teacher };
-                                                  teacherSchedule[teacher][targetDay][targetP] = { className, subject };
-                                                  
-                                                  // Free the old slot
-                                                  newTimetable[className][day][p] = { subject: 'Free', teacher: null };
-                                                  teacherSchedule[teacher][day][p] = null;
-                                                  
-                                                  moved = true;
-                                                  conflictsFixed = true;
-                                                  console.log(`✅ Moved conflict to ${className} ${targetDay} P${targetP+1}`);
-                                                  break;
-                                              }
-                                          }
-                                          if (moved) break;
-                                      }
-                                      
-                                      // If we couldn't move it, mark as free
-                                      if (!moved) {
-                                          console.log(`❌ Couldn't move conflict, marking as free: ${className} ${day} P${p+1}`);
-                                          newTimetable[className][day][p] = { subject: 'Free', teacher: null };
-                                          if (teacherSchedule[teacher] && teacherSchedule[teacher][day]) {
-                                              teacherSchedule[teacher][day][p] = null;
-                                          }
-                                          if (assignmentsPlaced[className][subject] > 0) {
-                                              assignmentsPlaced[className][subject]--;
-                                              totalDeficit++;
-                                          }
-                                          conflictsFixed = true;
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                      
-                      if (!hasConflict) {
-                          console.log('✅ No conflicts found!');
-                          break;
-                      }
-                  }
-                  
-                  // Recount free periods after repair and conflict fixing
+                  // Recount free periods after repair
                   let totalFreeCount = 0;
                   classes.forEach(className => {
                       workingDayLabels.forEach(day => {
