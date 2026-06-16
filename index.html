@@ -3805,6 +3805,12 @@
                           return false; // Need at least 2 to check next slot
                       }
 
+                      // Check if subject is allowed to be double period
+                      const isDoubleSubject = doublePeriodSubjects[className]?.[subject] || false;
+                      if (checkNextSlot && !isDoubleSubject && !relaxConstraints) {
+                          return false; // Only allow double periods for subjects marked as double
+                      }
+
                       // Check teacher start time
                       const teacherStart = teacherStartPeriod[teacher] || 1;
                       if (periodIndex < teacherStart - 1) return false;
@@ -3832,6 +3838,36 @@
                       if (!allowDoublePeriods && !relaxConstraints) {
                           const isSubjectAlreadyOnDay = newTimetable[className][day].some((lesson, index) => index !== periodIndex && lesson.subject === subject);
                           if (isSubjectAlreadyOnDay) return false;
+                      }
+
+                      // Check for consecutive periods to prevent 3 in a row
+                      const prevPeriod = periodIndex - 1;
+                      const nextPeriod = periodIndex + 1;
+                      if (!relaxConstraints) {
+                          // Check previous period
+                          if (prevPeriod >= 0 && newTimetable[className][day][prevPeriod].subject === subject) {
+                              // If previous is same, only allow if we're doing a double period (checkNextSlot is true)
+                              if (!checkNextSlot) {
+                                  return false;
+                              }
+                          }
+                          // Check if we're about to make 3 in a row
+                          if (prevPeriod >= 1 && 
+                              newTimetable[className][day][prevPeriod].subject === subject && 
+                              newTimetable[className][day][prevPeriod - 1].subject === subject) {
+                              return false;
+                          }
+                      }
+
+                      // Limit number of times a subject can appear per day (max 2 unless it's a double period)
+                      if (!relaxConstraints) {
+                          const subjectCountOnDay = newTimetable[className][day].filter(lesson => lesson.subject === subject).length;
+                          if (subjectCountOnDay >= 2 && !checkNextSlot) {
+                              return false;
+                          }
+                          if (subjectCountOnDay >= 2 && checkNextSlot && subjectCountOnDay + 2 > 2) {
+                              return false;
+                          }
                       }
                       
                       // For double periods (pairs), also check the NEXT slot
